@@ -1,0 +1,34 @@
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:{$PORT:8080} {
+	# Railway health check, answers without login.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		# Basic auth is sent automatically by browsers, so block cross-site writes (CSRF).
+		@crosssite {
+			header Sec-Fetch-Site cross-site
+			not method GET HEAD OPTIONS
+		}
+		respond @crosssite "cross-site request blocked" 403
+
+		basic_auth {
+			{$GATEWAY_USERNAME} {$GATEWAY_PASSWORD_HASH}
+		}
+		reverse_proxy {$UPSTREAM} {
+			# Stream chat answers (server-sent events) straight through.
+			flush_interval -1
+			transport http {
+				dial_timeout 10s
+			}
+		}
+	}
+}
