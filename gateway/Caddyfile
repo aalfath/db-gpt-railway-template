@@ -31,4 +31,10 @@
 			}
 		}
 	}
+
+	# While DB-GPT is still booting (about a minute after a deploy), say so instead of a bare 502.
+	handle_errors 502 503 504 {
+		header Retry-After 15
+		respond "DB-GPT is starting up. Refresh this page in a minute." 503
+	}
 }
