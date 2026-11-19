@@ -6,7 +6,9 @@ Runs before the webserver on every start (railway-start.sh):
 3. fresh database: loads the image's own assets/schema/dbgpt.sql (without its demo EXAMPLE_1 database),
    existing database: applies each upstream assets/schema/upgrade/vX_Y_Z/upgrade_to_*.sql newer than
    the recorded version, in order, skipping changes that are already there,
-4. records the schema version in the railway_template_meta table.
+4. creates any table DB-GPT's models define that the SQL files miss (upstream's dbgpt.sql lacks a few,
+   for example knowledge_wiki_task in 0.8.3), the same create_all DB-GPT runs itself on SQLite,
+5. records the schema version in the railway_template_meta table.
 DB-GPT itself does not run DDL on MySQL ("for safety considerations"), so this is upstream's manual
 step, automated.
 """
@@ -81,6 +83,54 @@ def run_file(cur, path, dbname, tolerant):
     log(f"applied {os.path.basename(path)} ({n} statements)")
 
 
+def create_missing_tables(dbname):
+    """Import every DB-GPT module that defines a table, then create only the missing ones."""
+    import importlib
+    import pkgutil
+    from urllib.parse import quote_plus
+
+    from sqlalchemy import create_engine, inspect
+
+    from dbgpt.storage.metadata import Model
+
+    for pkg_name in ("dbgpt", "dbgpt_serve", "dbgpt_app", "dbgpt_ext"):
+        try:
+            pkg = importlib.import_module(pkg_name)
+        except Exception:
+            continue
+        for path in pkg.__path__:
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [d for d in dirs if d not in ("tests", "_template_files", "__pycache__")]
+                for f in files:
+                    if not f.endswith(".py"):
+                        continue
+                    full = os.path.join(root, f)
+                    try:
+                        if "__tablename__" not in open(full, encoding="utf-8").read():
+                            continue
+                    except OSError:
+                        continue
+                    rel = os.path.relpath(full, os.path.dirname(path))[:-3]
+                    mod = rel.replace(os.sep, ".").removesuffix(".__init__")
+                    try:
+                        importlib.import_module(mod)
+                    except Exception as e:  # optional extras that aren't installed
+                        log(f"skip {mod}: {type(e).__name__}")
+    url = "mysql+pymysql://{}:{}@{}:{}/{}?charset=utf8mb4".format(
+        quote_plus(os.environ.get("MYSQL_USER") or "root"),
+        quote_plus(os.environ["MYSQL_PASSWORD"]),
+        os.environ["MYSQL_HOST"],
+        int(os.environ.get("MYSQL_PORT") or 3306),
+        dbname,
+    )
+    engine = create_engine(url)
+    before = set(inspect(engine).get_table_names())
+    Model.metadata.create_all(engine, checkfirst=True)
+    added = sorted(set(inspect(engine).get_table_names()) - before)
+    log(f"created {len(added)} missing table(s){': ' + ', '.join(added) if added else ''}")
+    engine.dispose()
+
+
 def main():
     dbname = os.environ.get("DBGPT_MYSQL_DATABASE") or "dbgpt"
     if not re.fullmatch(r"[A-Za-z0-9_]+", dbname):
@@ -132,6 +182,7 @@ def main():
             run_file(cur, f, dbname, tolerant=True)
         if not todo:
             log(f"schema is up to date ({APP_VERSION})")
+    create_missing_tables(dbname)
     cur.execute(
         "REPLACE INTO railway_template_meta (k, v) VALUES ('schema_version', %s)",
         (APP_VERSION,),
