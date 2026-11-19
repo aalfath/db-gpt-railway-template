@@ -7,8 +7,9 @@ api_keys = []
 encrypt_key = "${env:DBGPT_ENCRYPT_KEY}"
 
 [service.web]
-# "::" listens on IPv6 and IPv4, so Railway's private network and health check both reach it.
-host = "::"
+# 0.0.0.0, not "::": uvicorn on "::" is IPv6-only and the in-process model worker
+# registers over 127.0.0.1. Railway's private DNS resolves to IPv4 as well.
+host = "0.0.0.0"
 port = "${env:PORT:-5670}"
 cors_allowed_origins = "${env:DBGPT_CORS_ALLOWED_ORIGINS:-*}"
 
